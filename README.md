@@ -1,65 +1,88 @@
-#include <HX711.h>
 #include <Servo.h>
-#include <ESP32CAM.h>  // Include camera library for ESP32-CAM
+#include "HX711.h"
+#include <RTClib.h>
+#include <Wire.h>
 
-// Pin definitions
-#define IR_PIN 7
+#define IR_SENSOR_PIN 2
 #define SERVO_PIN 9
-#define LOAD_CELL_DT A1
-#define LOAD_CELL_SCK A0
+#define BUZZER_PIN 6
+#define LED_PIN 7
+#define HX711_DOUT A1
+#define HX711_CLK A0
 
-// Set up components
 HX711 scale;
-Servo foodServo;
-ESP32CAM camera;
+RTC_DS3231 rtc;
+Servo feederServo;
 
-// Set up variables
-long weightThreshold = 1000;  // Weight threshold for dispensing food (example)
-bool birdDetected = false;
+// Feeding control
+unsigned long lastFeedTime = 0;
+const unsigned long FEED_COOLDOWN = 60UL * 60UL * 1000UL; // 1 hour
+int feedCountThisHour = 0;
+const int FEED_LIMIT = 3;
+
+// State
+bool aiConfirmedBird = false;
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
+  feederServo.attach(SERVO_PIN);
+  pinMode(IR_SENSOR_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
 
-  // Set up the load cell
-  scale.begin(LOAD_CELL_DT, LOAD_CELL_SCK);
-  scale.set_scale(2280); // Adjust calibration factor as needed
-  scale.tare(); // Set zero offset
+  scale.begin(HX711_DOUT, HX711_CLK);
+  scale.set_scale(2280.f);
+  scale.tare();
 
-  // Set up servo motor
-  foodServo.attach(SERVO_PIN);
-  
-  // Set up the IR sensor
-  pinMode(IR_PIN, INPUT);
-  
-  // Set up the ESP32-CAM
-  camera.begin();
-  camera.setResolution(ESP32CAM::Resolution::UXGA);
-  
-  Serial.println("System Ready");
+  if (!rtc.begin()) {
+    Serial.println("Couldn't find RTC!");
+    while (1);
+  }
+
+  Serial.println("Smart Bird Feeder (Advanced) Ready.");
 }
 
 void loop() {
-  if (digitalRead(IR_PIN) == HIGH) {  // Bird detected
-    birdDetected = true;
-    long weight = scale.get_units(10); // Read weight from load cell
-    Serial.print("Weight: ");
-    Serial.println(weight);
+  DateTime now = rtc.now();
+  float foodWeight = scale.get_units();
+  int irStatus = digitalRead(IR_SENSOR_PIN);
 
-    if (birdDetected && weight >= weightThreshold) {
-      // Capture image from the ESP32-CAM
-      camera.capture();
-      Serial.println("Image Captured");
-
-      // Save the image or upload it to cloud (this part depends on your setup)
-      
-      // Dispense food
-      foodServo.write(90);  // Activate food dispensing (adjust angle as needed)
-      delay(5000);  // Keep the servo activated for 5 seconds to dispense food
-      foodServo.write(0);  // Stop dispensing food
-
-      birdDetected = false;  // Reset bird detection
+  // Serial read from Pi
+  if (Serial.available()) {
+    char input = Serial.read();
+    if (input == '1') {
+      aiConfirmedBird = true;
+      Serial.println("AI confirmation received.");
     }
   }
 
-  delay(1000); // Delay for a while before next reading
+  // Reset feed count every hour
+  if (now.minute() == 0 && now.second() == 0 && (millis() - lastFeedTime) > 5000) {
+    feedCountThisHour = 0;
+    Serial.println("Feed count reset for new hour.");
+  }
+
+  if (irStatus == LOW && aiConfirmedBird && millis() - lastFeedTime > FEED_COOLDOWN && feedCountThisHour < FEED_LIMIT) {
+    dispenseFood(now);
+    aiConfirmedBird = false;
+    lastFeedTime = millis();
+    feedCountThisHour++;
+  }
+
+  delay(300); // Reduce CPU usage
+}
+
+void dispenseFood(DateTime timestamp) {
+  Serial.print("Dispensing food at: ");
+  Serial.print(timestamp.hour()); Serial.print(":");
+  Serial.print(timestamp.minute()); Serial.print(":");
+  Serial.println(timestamp.second());
+
+  digitalWrite(LED_PIN, HIGH);
+  tone(BUZZER_PIN, 1000, 300);
+  feederServo.write(90); delay(2000); feederServo.write(0);
+  digitalWrite(LED_PIN, LOW);
+
+  Serial.print("Current feed count: ");
+  Serial.println(feedCountThisHour + 1);
 }
